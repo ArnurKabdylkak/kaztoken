@@ -1,0 +1,84 @@
+#include <stdint.h>
+
+#define PCONP       (*(volatile uint32_t*)0x400FC0C4)
+#define PCLKSEL0    (*(volatile uint32_t*)0x400FC1A8)
+#define PINSEL0     (*(volatile uint32_t*)0x4002C000)
+#define PINSEL1     (*(volatile uint32_t*)0x4002C004)
+#define FIO2DIR     (*(volatile uint32_t*)0x2009C040)
+#define FIO2SET     (*(volatile uint32_t*)0x2009C058)
+#define FIO2CLR     (*(volatile uint32_t*)0x2009C05C)
+
+#define U1THR       (*(volatile uint32_t*)0x40010000)
+#define U1DLL       (*(volatile uint32_t*)0x40010000)
+#define U1DLM       (*(volatile uint32_t*)0x40010004)
+#define U1FCR       (*(volatile uint32_t*)0x40010008)
+#define U1LCR       (*(volatile uint32_t*)0x4001000C)
+#define U1LSR       (*(volatile uint32_t*)0x40010014)
+#define U1FDR       (*(volatile uint32_t*)0x40010028)
+
+#define LED_DS1     (1u << 2)
+#define LED_DS2     (1u << 3)
+#define LED_DS3     (1u << 4)
+#define LED_DS5     (1u << 5)
+#define LED_ALL     (LED_DS1 | LED_DS2 | LED_DS3 | LED_DS5)
+
+/* ~3 сек @ IRC 4 MHz */
+static void delay_3s(void) {
+    volatile uint32_t i = 3000000UL;
+    while (i--) __asm__("nop");
+}
+
+static void uart1_init(void) {
+    PCONP    |= (1u << 4);
+    PCLKSEL0  = (PCLKSEL0 & ~(3u << 8)) | (1u << 8);
+
+    /* P0.15 = TXD1 → PINSEL0[31:30] = 01 */
+    PINSEL0 = (PINSEL0 & ~(3u << 30)) | (1u << 30);
+    /* P0.16 = RXD1 → PINSEL1[1:0]   = 01 */
+    PINSEL1 = (PINSEL1 & ~(3u <<  0)) | (1u <<  0);
+
+    U1LCR = 0x83;
+    U1DLL = 26; U1DLM = 0;
+    U1FDR = (1u << 4) | 0u;
+    U1LCR = 0x03;
+    U1FCR = 0x07;
+}
+
+static void putc_(char c) {
+    while (!(U1LSR & (1u << 5)));
+    U1THR = c;
+}
+
+static void puts_(const char *s) {
+    while (*s) {
+        if (*s == '\n') putc_('\r');
+        putc_(*s++);
+    }
+}
+
+static void leds_init(void) {
+    FIO2DIR |= LED_ALL;
+    FIO2SET  = LED_ALL;
+}
+
+int main(void) {
+    uart1_init();
+    leds_init();
+
+    puts_("LPC1768 LED sequencer started\n");
+    puts_("DS1=P2.2  DS2=P2.3  DS3=P2.4  DS5=P2.5  (active LOW)\n\n");
+
+    const uint32_t masks[4] = { LED_DS1, LED_DS2, LED_DS3, LED_DS5 };
+    const char    *names[4] = { "DS1 (P2.2)", "DS2 (P2.3)",
+                                 "DS3 (P2.4)", "DS5 (P2.5)" };
+
+    while (1) {
+        for (int i = 0; i < 4; i++) {
+            FIO2SET = LED_ALL;
+            FIO2CLR = masks[i];
+            puts_(names[i]);
+            puts_(" ON\n");
+            delay_3s();
+        }
+    }
+}

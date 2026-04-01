@@ -1,0 +1,359 @@
+
+Discarded input sections
+
+ .group         0x00000000        0xc build/glitch.o
+ .group         0x00000000        0xc build/glitch.o
+ .group         0x00000000        0xc build/glitch.o
+ .group         0x00000000        0xc build/glitch.o
+ .group         0x00000000        0xc build/glitch.o
+ .group         0x00000000        0xc build/glitch.o
+ .group         0x00000000        0xc build/glitch.o
+ .group         0x00000000        0xc build/glitch.o
+ .group         0x00000000        0xc build/glitch.o
+ .text          0x00000000       0x4c build/glitch.o
+ .data          0x00000000        0x0 build/glitch.o
+ .bss           0x00000000        0x0 build/glitch.o
+ .text.target_power_on
+                0x00000000        0x8 build/glitch.o
+ .ARM.attributes
+                0x00000000       0x2e build/glitch.o
+ .group         0x00000000        0xc build/main.o
+ .group         0x00000000        0xc build/main.o
+ .group         0x00000000        0xc build/main.o
+ .group         0x00000000        0xc build/main.o
+ .group         0x00000000        0xc build/main.o
+ .group         0x00000000        0xc build/main.o
+ .group         0x00000000        0xc build/main.o
+ .group         0x00000000        0xc build/main.o
+ .group         0x00000000        0xc build/main.o
+ .text          0x00000000        0x0 build/main.o
+ .data          0x00000000        0x0 build/main.o
+ .bss           0x00000000        0x0 build/main.o
+ .debug_macro   0x00000000      0xade build/main.o
+ .debug_macro   0x00000000      0x1a5 build/main.o
+ .debug_macro   0x00000000       0x22 build/main.o
+ .debug_macro   0x00000000       0x8e build/main.o
+ .debug_macro   0x00000000       0x51 build/main.o
+ .debug_macro   0x00000000      0x103 build/main.o
+ .debug_macro   0x00000000       0x6a build/main.o
+ .debug_macro   0x00000000      0x1df build/main.o
+ .debug_macro   0x00000000       0xf2 build/main.o
+ .ARM.attributes
+                0x00000000       0x2e build/main.o
+ .group         0x00000000        0xc build/system.o
+ .group         0x00000000        0xc build/system.o
+ .group         0x00000000        0xc build/system.o
+ .group         0x00000000        0xc build/system.o
+ .group         0x00000000        0xc build/system.o
+ .group         0x00000000        0xc build/system.o
+ .group         0x00000000        0xc build/system.o
+ .group         0x00000000        0xc build/system.o
+ .group         0x00000000        0xc build/system.o
+ .text          0x00000000        0x0 build/system.o
+ .data          0x00000000        0x0 build/system.o
+ .bss           0x00000000        0x0 build/system.o
+ .rodata.uart_pc_put_hex32.str1.4
+                0x00000000       0x15 build/system.o
+ .text.uart_pc_put_hex32
+                0x00000000       0x48 build/system.o
+ .text.uart_pc_getc_timeout
+                0x00000000       0x38 build/system.o
+ .text.uart_target_getc
+                0x00000000       0x18 build/system.o
+ .debug_macro   0x00000000      0xade build/system.o
+ .debug_macro   0x00000000      0x1a5 build/system.o
+ .debug_macro   0x00000000       0x22 build/system.o
+ .debug_macro   0x00000000       0x8e build/system.o
+ .debug_macro   0x00000000       0x51 build/system.o
+ .debug_macro   0x00000000      0x103 build/system.o
+ .debug_macro   0x00000000       0x6a build/system.o
+ .debug_macro   0x00000000      0x1df build/system.o
+ .debug_macro   0x00000000       0xf2 build/system.o
+ .ARM.attributes
+                0x00000000       0x2e build/system.o
+ .data          0x00000000        0x0 build/startup.o
+ .bss           0x00000000        0x0 build/startup.o
+ .ARM.attributes
+                0x00000000       0x21 build/startup.o
+
+Memory Configuration
+
+Name             Origin             Length             Attributes
+FLASH            0x08000000         0x00080000         xr
+SRAM             0x20000000         0x00020000         xrw
+*default*        0x00000000         0xffffffff
+
+Linker script and memory map
+
+LOAD build/glitch.o
+LOAD build/main.o
+LOAD build/system.o
+LOAD build/startup.o
+                0x00001000                        _stack_size = 0x1000
+
+.vectors        0x08000000      0x198
+                0x08000000                        . = ALIGN (0x4)
+ *(.vectors)
+ .vectors       0x08000000      0x198 build/startup.o
+                0x08000198                        . = ALIGN (0x4)
+
+.text           0x08000198     0x1504
+                0x08000198                        . = ALIGN (0x4)
+ *(.text*)
+ .text.ns_to_ticks
+                0x08000198       0x10 build/glitch.o
+ .text.wait_trigger
+                0x080001a8       0x30 build/glitch.o
+ .text.glitch_set_params
+                0x080001d8       0x2a build/glitch.o
+                0x080001d8                glitch_set_params
+ *fill*         0x08000202        0x2 
+ .text.timer_glitch_init
+                0x08000204       0x44 build/glitch.o
+                0x08000204                timer_glitch_init
+ .text.glitch_fire_manual
+                0x08000248       0x48 build/glitch.o
+                0x08000248                glitch_fire_manual
+ .text.trigger_exti_init
+                0x08000290       0x3c build/glitch.o
+                0x08000290                trigger_exti_init
+ .text.glitch_arm
+                0x080002cc       0x58 build/glitch.o
+                0x080002cc                glitch_arm
+ .text.glitch_fire_on_trigger
+                0x08000324       0x48 build/glitch.o
+                0x08000324                glitch_fire_on_trigger
+ .text.target_reset
+                0x0800036c       0x20 build/glitch.o
+                0x0800036c                target_reset
+ .text.target_enter_isp
+                0x0800038c       0xc0 build/glitch.o
+                0x0800038c                target_enter_isp
+ .text.streq    0x0800044c       0x20 build/main.o
+ .text.starts_with
+                0x0800046c       0x16 build/main.o
+ .text.parse_uint
+                0x08000482       0x2c build/main.o
+ .text.next_token
+                0x080004ae       0x18 build/main.o
+ *fill*         0x080004c6        0x2 
+ .text.read_cmd_line
+                0x080004c8       0x54 build/main.o
+ .text.cmd_process
+                0x0800051c      0x6f4 build/main.o
+                0x0800051c                cmd_process
+ .text.main     0x08000c10       0x9c build/main.o
+                0x08000c10                main
+ .text.clock_init_100mhz
+                0x08000cac       0x90 build/system.o
+                0x08000cac                clock_init_100mhz
+ .text.dwt_init
+                0x08000d3c       0x24 build/system.o
+                0x08000d3c                dwt_init
+ .text.delay_us
+                0x08000d60       0x1c build/system.o
+                0x08000d60                delay_us
+ .text.delay_ms
+                0x08000d7c       0x16 build/system.o
+                0x08000d7c                delay_ms
+ *fill*         0x08000d92        0x2 
+ .text.gpio_init
+                0x08000d94       0x88 build/system.o
+                0x08000d94                gpio_init
+ .text.uart_pc_init
+                0x08000e1c       0x64 build/system.o
+                0x08000e1c                uart_pc_init
+ .text.uart_pc_putc
+                0x08000e80       0x14 build/system.o
+                0x08000e80                uart_pc_putc
+ .text.uart_pc_puts
+                0x08000e94       0x20 build/system.o
+                0x08000e94                uart_pc_puts
+ .text.uart_pc_put_dec
+                0x08000eb4       0x58 build/system.o
+                0x08000eb4                uart_pc_put_dec
+ .text.uart_pc_getc
+                0x08000f0c       0x18 build/system.o
+                0x08000f0c                uart_pc_getc
+ .text.uart_target_init
+                0x08000f24       0x64 build/system.o
+                0x08000f24                uart_target_init
+ .text.uart_target_putc
+                0x08000f88       0x14 build/system.o
+                0x08000f88                uart_target_putc
+ .text.uart_target_puts
+                0x08000f9c       0x14 build/system.o
+                0x08000f9c                uart_target_puts
+ .text.uart_target_getc_timeout
+                0x08000fb0       0x38 build/system.o
+                0x08000fb0                uart_target_getc_timeout
+ .text.uart_target_read_line
+                0x08000fe8       0x34 build/system.o
+                0x08000fe8                uart_target_read_line
+ .text          0x0800101c       0x40 build/startup.o
+                0x0800101c                Reset_Handler
+                0x08001046                Default_Handler
+ *(.rodata*)
+ .rodata.glitch_fire_on_trigger.str1.4
+                0x0800105c      0x63d build/glitch.o
+                                 0x41 (size before relaxing)
+ .rodata.target_enter_isp.str1.4
+                0x08001699        0x0 build/glitch.o
+                                 0x82 (size before relaxing)
+ .rodata.read_cmd_line.str1.4
+                0x08001699        0x0 build/main.o
+                                  0x8 (size before relaxing)
+ .rodata.cmd_process.str1.4
+                0x08001699        0x0 build/main.o
+                                0x4cc (size before relaxing)
+ .rodata.main.str1.4
+                0x08001699        0x0 build/main.o
+                                 0xc5 (size before relaxing)
+                0x0800169c                        . = ALIGN (0x4)
+ *fill*         0x08001699        0x3 
+                0x0800169c                        _etext = .
+                0x0800169c                        _sidata = LOADADDR (.data)
+
+.glue_7         0x0800169c        0x0
+ .glue_7        0x0800169c        0x0 linker stubs
+
+.glue_7t        0x0800169c        0x0
+ .glue_7t       0x0800169c        0x0 linker stubs
+
+.vfp11_veneer   0x0800169c        0x0
+ .vfp11_veneer  0x0800169c        0x0 linker stubs
+
+.v4_bx          0x0800169c        0x0
+ .v4_bx         0x0800169c        0x0 linker stubs
+
+.iplt           0x0800169c        0x0
+ .iplt          0x0800169c        0x0 build/glitch.o
+
+.rel.dyn        0x0800169c        0x0
+ .rel.iplt      0x0800169c        0x0 build/glitch.o
+
+.data           0x20000000       0x18 load address 0x0800169c
+                0x20000000                        . = ALIGN (0x4)
+                0x20000000                        _sdata = .
+ *(.data*)
+ .data.gp       0x20000000       0x18 build/main.o
+                0x20000018                        . = ALIGN (0x4)
+                0x20000018                        _edata = .
+
+.igot.plt       0x20000018        0x0 load address 0x080016b4
+ .igot.plt      0x20000018        0x0 build/glitch.o
+
+.bss            0x20000018        0x8 load address 0x080016b4
+                0x20000018                        . = ALIGN (0x4)
+                0x20000018                        _sbss = .
+ *(.bss*)
+ .bss.g_triggered
+                0x20000018        0x1 build/glitch.o
+ *fill*         0x20000019        0x3 
+ .bss.g_params  0x2000001c        0x4 build/glitch.o
+ *(COMMON)
+                0x20000020                        . = ALIGN (0x4)
+                0x20000020                        _ebss = .
+
+.stack          0x20000020     0x1000 load address 0x080016b4
+ .stack         0x20000020     0x1000 build/startup.o
+
+.stack          0x20001020     0x1000 load address 0x080016b4
+                0x20001020                        . = ALIGN (0x8)
+                0x20002020                        . = (. + _stack_size)
+ *fill*         0x20001020     0x1000 
+                0x20002020                        _stack_top = .
+
+/DISCARD/
+ *(.ARM.exidx*)
+ *(.ARM.attributes*)
+OUTPUT(build/glitcher.elf elf32-littlearm)
+LOAD linker stubs
+
+.debug_info     0x00000000     0x24c2
+ .debug_info    0x00000000      0x809 build/glitch.o
+ .debug_info    0x00000809     0x16b7 build/main.o
+ .debug_info    0x00001ec0      0x5d1 build/system.o
+ .debug_info    0x00002491       0x31 build/startup.o
+
+.debug_abbrev   0x00000000      0x6ef
+ .debug_abbrev  0x00000000      0x219 build/glitch.o
+ .debug_abbrev  0x00000219      0x2be build/main.o
+ .debug_abbrev  0x000004d7      0x1f0 build/system.o
+ .debug_abbrev  0x000006c7       0x28 build/startup.o
+
+.debug_loclists
+                0x00000000      0x873
+ .debug_loclists
+                0x00000000      0x147 build/glitch.o
+ .debug_loclists
+                0x00000147      0x4a1 build/main.o
+ .debug_loclists
+                0x000005e8      0x28b build/system.o
+
+.debug_aranges  0x00000000      0x190
+ .debug_aranges
+                0x00000000       0x78 build/glitch.o
+ .debug_aranges
+                0x00000078       0x50 build/main.o
+ .debug_aranges
+                0x000000c8       0xa8 build/system.o
+ .debug_aranges
+                0x00000170       0x20 build/startup.o
+
+.debug_rnglists
+                0x00000000      0x184
+ .debug_rnglists
+                0x00000000       0x56 build/glitch.o
+ .debug_rnglists
+                0x00000056       0xb3 build/main.o
+ .debug_rnglists
+                0x00000109       0x7b build/system.o
+
+.debug_macro    0x00000000     0x1333
+ .debug_macro   0x00000000       0x7b build/glitch.o
+ .debug_macro   0x0000007b      0xade build/glitch.o
+ .debug_macro   0x00000b59      0x1a5 build/glitch.o
+ .debug_macro   0x00000cfe       0x22 build/glitch.o
+ .debug_macro   0x00000d20       0x8e build/glitch.o
+ .debug_macro   0x00000dae       0x51 build/glitch.o
+ .debug_macro   0x00000dff      0x103 build/glitch.o
+ .debug_macro   0x00000f02       0x6a build/glitch.o
+ .debug_macro   0x00000f6c      0x1df build/glitch.o
+ .debug_macro   0x0000114b       0xf2 build/glitch.o
+ .debug_macro   0x0000123d       0x7b build/main.o
+ .debug_macro   0x000012b8       0x7b build/system.o
+
+.debug_line     0x00000000     0x13ea
+ .debug_line    0x00000000      0x553 build/glitch.o
+ .debug_line    0x00000553      0x719 build/main.o
+ .debug_line    0x00000c6c      0x71b build/system.o
+ .debug_line    0x00001387       0x63 build/startup.o
+
+.debug_str      0x00000000     0x4924
+ .debug_str     0x00000000     0x4924 build/glitch.o
+                               0x495d (size before relaxing)
+ .debug_str     0x00004924        0x0 build/main.o
+                               0x4966 (size before relaxing)
+ .debug_str     0x00004924        0x0 build/system.o
+                               0x48c0 (size before relaxing)
+ .debug_str     0x00004924        0x0 build/startup.o
+                                 0x48 (size before relaxing)
+
+.comment        0x00000000       0x23
+ .comment       0x00000000       0x23 build/glitch.o
+                                 0x24 (size before relaxing)
+ .comment       0x00000023        0x0 build/main.o
+                                 0x24 (size before relaxing)
+ .comment       0x00000023        0x0 build/system.o
+                                 0x24 (size before relaxing)
+
+.debug_frame    0x00000000      0x33c
+ .debug_frame   0x00000000      0x108 build/glitch.o
+ .debug_frame   0x00000108       0xbc build/main.o
+ .debug_frame   0x000001c4      0x178 build/system.o
+
+.debug_line_str
+                0x00000000       0x2c
+ .debug_line_str
+                0x00000000       0x2c build/startup.o

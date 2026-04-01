@@ -1,0 +1,10 @@
+1. Read particular adress zone via ISP
+2. Erase flash 
+3. Read BootROM
+4. Do 1K to a .bin file  
+
+
+BootROM
+MPU
+
+

@@ -1,0 +1,1021 @@
+#!/usr/bin/env python3
+"""
+lpc_isp.py — LPC1768 ISP tool: read/write flash memory via UART.
+
+Usage:
+  # Read:
+  python3 lpc_isp.py read  -p /dev/ttyUSB0 -a 0x0 -s 4096
+  python3 lpc_isp.py read  -p /dev/ttyUSB0 -a 0x2FC -s 4              # CRP word
+  python3 lpc_isp.py read  -p /dev/ttyUSB0 -a 0x1FFF0000 -s 0x4000    # Boot ROM
+
+  # Write full firmware:
+  python3 lpc_isp.py write -p /dev/ttyUSB0 -f firmware.bin
+  python3 lpc_isp.py write -p /dev/ttyUSB0 -f firmware.bin -a 0x0      # explicit addr
+
+  # Write fragment at offset:
+  python3 lpc_isp.py write -p /dev/ttyUSB0 -f patch.bin -a 0x4000
+
+  # Write + verify:
+  python3 lpc_isp.py write -p /dev/ttyUSB0 -f firmware.bin --verify
+
+  # Mass erase (works even with CRP1/CRP2 active):
+  python3 lpc_isp.py erase -p /dev/ttyUSB0
+  python3 lpc_isp.py erase -p /dev/ttyUSB0 -y                       # skip prompt
+  python3 lpc_isp.py erase -p /dev/ttyUSB0 -y -f firmware.bin       # erase + write
+
+  # Info only (Part ID, UID, boot code version):
+  python3 lpc_isp.py info  -p /dev/ttyUSB0
+
+Requires: pyserial (pip install pyserial)
+"""
+
+import sys
+import argparse
+import time
+import struct
+import os
+
+try:
+    import serial
+except ImportError:
+    print("ERROR: pyserial not installed. Run: pip install pyserial",
+          file=sys.stderr)
+    sys.exit(1)
+
+
+# ============================================================
+#  LPC1768 sector map
+# ============================================================
+
+# Sectors 0-15: 4 KB each, Sectors 16-29: 32 KB each
+LPC1768_SECTORS = []
+for _i in range(16):
+    LPC1768_SECTORS.append((_i * 0x1000, 0x1000))           # 4 KB
+for _i in range(14):
+    LPC1768_SECTORS.append((0x10000 + _i * 0x8000, 0x8000)) # 32 KB
+
+FLASH_SIZE   = 0x80000   # 512 KB
+LAST_SECTOR  = 29        # sectors 0-29
+RAM_BUF      = 0x10000200 # staging area in SRAM (above vector remap area)
+RAM_BUF_SZ   = 4096       # max chunk per copy-to-flash
+
+# In ISP mode MEMMAP=0 (Boot Loader Mode): the bottom of address space
+# is remapped to Boot ROM.  The R command reads through the memory map,
+# so reads return Boot ROM content instead of user Flash.
+# LPC1768 vector table: 16 system exceptions + 35 IRQs = 51 entries,
+# but the hardware remaps a 512-byte (0x200) aligned block.
+# Writes via Copy RAM to Flash go to physical Flash and are unaffected.
+ISP_REMAP_SIZE = 0x200    # 512 bytes
+
+
+def addr_to_sector(addr):
+    """Return sector number containing 'addr', or -1."""
+    for idx, (start, size) in enumerate(LPC1768_SECTORS):
+        if start <= addr < start + size:
+            return idx
+    return -1
+
+
+def sectors_for_range(addr, length):
+    """Return (first_sector, last_sector) covering [addr, addr+length)."""
+    first = addr_to_sector(addr)
+    last = addr_to_sector(addr + length - 1)
+    if first < 0 or last < 0:
+        return None, None
+    return first, last
+
+
+# ============================================================
+#  UU-encode / decode
+# ============================================================
+
+def _uu_char(val):
+    """Encode 6-bit value to UU character."""
+    val &= 0x3F
+    return chr(val + 0x20) if val != 0 else '`'
+
+
+def uu_encode_line(data):
+    """UU-encode up to 45 bytes into one line (length char + encoded chars)."""
+    n = len(data)
+    if n > 45:
+        n = 45
+        data = data[:45]
+    line = _uu_char(n)
+    i = 0
+    while i < n:
+        b0 = data[i] if i < n else 0
+        b1 = data[i + 1] if i + 1 < n else 0
+        b2 = data[i + 2] if i + 2 < n else 0
+        line += _uu_char(b0 >> 2)
+        line += _uu_char(((b0 & 0x03) << 4) | (b1 >> 4))
+        line += _uu_char(((b1 & 0x0F) << 2) | (b2 >> 6))
+        line += _uu_char(b2 & 0x3F)
+        i += 3
+    return line
+
+
+def uu_decode_line(line):
+    """Decode a single UU-encoded line into bytes."""
+    line = line.rstrip('\r\n')
+    if not line:
+        return b''
+    n = (ord(line[0]) - 0x20) & 0x3F
+    if n == 0:
+        return b''
+    data = bytearray()
+    i = 1
+    while len(data) < n:
+        c = [(ord(line[j]) - 0x20) & 0x3F if j < len(line) else 0
+             for j in range(i, i + 4)]
+        data.append((c[0] << 2) | (c[1] >> 4))
+        data.append(((c[1] & 0x0F) << 4) | (c[2] >> 2))
+        data.append(((c[2] & 0x03) << 6) | c[3])
+        i += 4
+    return bytes(data[:n])
+
+
+# ============================================================
+#  LPC ISP protocol
+# ============================================================
+
+class LpcIsp:
+    RETURN_CODES = {
+        0: "CMD_SUCCESS", 1: "INVALID_COMMAND", 2: "SRC_ADDR_ERROR",
+        3: "DST_ADDR_ERROR", 4: "SRC_ADDR_NOT_MAPPED",
+        5: "DST_ADDR_NOT_MAPPED", 6: "COUNT_ERROR", 7: "INVALID_SECTOR",
+        8: "SECTOR_NOT_BLANK", 9: "SECTOR_NOT_PREPARED",
+        10: "COMPARE_ERROR", 11: "BUSY", 12: "PARAM_ERROR",
+        13: "ADDR_ERROR", 14: "ADDR_NOT_MAPPED", 15: "CMD_LOCKED",
+        16: "INVALID_CODE", 17: "INVALID_BAUD_RATE",
+        18: "INVALID_STOP_BIT", 19: "CRP_ENABLED",
+    }
+
+    # Valid sizes for Copy RAM to Flash
+    COPY_SIZES = [256, 512, 1024, 4096]
+
+    # UU-encoded lines per checksum block
+    UU_LINES_PER_BLOCK = 20
+
+    def __init__(self, port, baud=9600, crystal_khz=4000, timeout=2):
+        self.ser = serial.Serial(port, baud, timeout=timeout)
+        self.crystal_khz = crystal_khz
+        self.echo = True
+        self.debug = False
+        self.verbose = True
+        self._pushback = None
+
+    def close(self):
+        self.ser.close()
+
+    def _log(self, msg):
+        if self.verbose:
+            print(f"  [ISP] {msg}", file=sys.stderr)
+
+    def _dbg(self, msg):
+        if self.debug:
+            print(f"  [DBG] {msg}", file=sys.stderr)
+
+    def _code_str(self, code):
+        """Human-readable return code."""
+        if isinstance(code, str):
+            code = int(code) if code.strip().isdigit() else -1
+        return self.RETURN_CODES.get(code, "UNKNOWN")
+
+    # ----------------------------------------------------------
+    #  Low-level serial I/O
+    # ----------------------------------------------------------
+
+    def _read_line(self, timeout=None):
+        old = self.ser.timeout
+        if timeout is not None:
+            self.ser.timeout = timeout
+        raw = self.ser.readline()
+        if timeout is not None:
+            self.ser.timeout = old
+        line = raw.decode('ascii', errors='replace').rstrip('\r\n')
+        if line:
+            self._dbg(f"<< {line!r}")
+        return line
+
+    def _send_raw(self, text):
+        self._dbg(f">> {text!r}")
+        self.ser.write((text + '\r\n').encode('ascii'))
+        self.ser.flush()
+
+    def _drain(self):
+        time.sleep(0.05)
+        self.ser.reset_input_buffer()
+        self._pushback = None
+
+    def _consume_echo(self, cmd):
+        if not self.echo:
+            return
+        line = self._read_line(timeout=0.5)
+        if line.strip() == cmd.strip():
+            self._dbg(f"   (echo consumed)")
+        else:
+            self._pushback = line
+            self._dbg(f"   (not echo, pushback: {line!r})")
+
+    def _read_response_line(self, timeout=None):
+        if self._pushback is not None:
+            line = self._pushback
+            self._pushback = None
+            self._dbg(f"<< {line!r} (pushback)")
+            return line
+        return self._read_line(timeout=timeout)
+
+    def _send_cmd_get_code(self, cmd):
+        """Send command, consume echo, return integer return code or -1."""
+        self._send_raw(cmd)
+        self._consume_echo(cmd)
+        line = self._read_response_line(timeout=2)
+        stripped = line.strip() if line else ''
+        if stripped.isdigit():
+            return int(stripped)
+        self._dbg(f"   unexpected response: {stripped!r}")
+        return -1
+
+    # ----------------------------------------------------------
+    #  Synchronization
+    # ----------------------------------------------------------
+
+    def synchronize(self, retries=30):
+        self._log("Synchronizing...")
+        self._drain()
+
+        for attempt in range(retries):
+            self.ser.write(b'?')
+            self.ser.flush()
+            line = self._read_line(timeout=0.15)
+
+            if 'Synchronized' not in line:
+                continue
+
+            self._log(f"Got 'Synchronized' (attempt {attempt + 1})")
+
+            self._send_raw('Synchronized')
+            for _ in range(5):
+                resp = self._read_line(timeout=0.5)
+                if 'OK' in resp:
+                    break
+
+            freq_str = str(self.crystal_khz)
+            self._send_raw(freq_str)
+            for _ in range(5):
+                resp = self._read_line(timeout=0.5)
+                if 'OK' in resp:
+                    break
+
+            self._drain()
+            self._log("Synchronized OK")
+            return True
+
+        self._log("Synchronization FAILED")
+        return False
+
+    # ----------------------------------------------------------
+    #  Echo control
+    # ----------------------------------------------------------
+
+    def disable_echo(self):
+        self._send_raw('A 0')
+        got_ok = False
+        for _ in range(5):
+            line = self._read_line(timeout=0.5)
+            if not line:
+                break
+            stripped = line.strip()
+            if stripped == 'A 0':
+                continue
+            if stripped == '0':
+                got_ok = True
+                break
+
+        if got_ok:
+            self.echo = False
+            self._pushback = None
+            self._log("Echo disabled")
+            return True
+
+        self._log("WARNING: Echo disable uncertain")
+        self.echo = False
+        self._pushback = None
+        return False
+
+    # ----------------------------------------------------------
+    #  Info commands
+    # ----------------------------------------------------------
+
+    def read_part_id(self):
+        self._send_raw('J')
+        self._consume_echo('J')
+        code_line = self._read_response_line(timeout=1)
+        if code_line.strip() != '0':
+            self._log(f"Part ID failed, code={code_line!r}")
+            return None
+        pid_line = self._read_line(timeout=1)
+        try:
+            pid = int(pid_line.strip())
+            self._log(f"Part ID: 0x{pid:08X} ({pid})")
+            return pid
+        except ValueError:
+            self._log(f"Part ID parse error: {pid_line!r}")
+            return None
+
+    def read_uid(self):
+        self._send_raw('N')
+        self._consume_echo('N')
+        code_line = self._read_response_line(timeout=1)
+        if code_line.strip() != '0':
+            self._log(f"UID failed, code={code_line!r}")
+            return None
+        try:
+            uid = [int(self._read_line(timeout=1).strip()) for _ in range(4)]
+            self._log(f"UID: {' '.join(f'{w:08X}' for w in uid)}")
+            return uid
+        except ValueError:
+            self._log("UID parse error")
+            return None
+
+    def read_boot_version(self):
+        """'K' command -> boot code version (major, minor)."""
+        self._send_raw('K')
+        self._consume_echo('K')
+        code_line = self._read_response_line(timeout=1)
+        if code_line.strip() != '0':
+            self._log(f"Boot version failed, code={code_line!r}")
+            return None
+        try:
+            minor = int(self._read_line(timeout=1).strip())
+            major = int(self._read_line(timeout=1).strip())
+            self._log(f"Boot code version: {major}.{minor}")
+            return (major, minor)
+        except ValueError:
+            self._log("Boot version parse error")
+            return None
+
+    def unlock(self):
+        code = self._send_cmd_get_code('U 23130')
+        if code == 0:
+            self._log("Flash unlocked")
+            return True
+        self._log(f"Unlock: code={code} ({self._code_str(code)})")
+        return code == 0
+
+    # ----------------------------------------------------------
+    #  Read memory (R command)
+    # ----------------------------------------------------------
+
+    def read_memory(self, address, size):
+        if address & 3:
+            self._log(f"ERROR: address 0x{address:08X} not word-aligned")
+            return None
+        if size & 3:
+            size = (size + 3) & ~3
+        if size > 4096:
+            self._log("ERROR: max 4096 per R command")
+            return None
+
+        cmd = f'R {address} {size}'
+        self._send_raw(cmd)
+        self._consume_echo(cmd)
+
+        code_line = self._read_response_line(timeout=2)
+        if code_line.strip() != '0':
+            code_int = int(code_line.strip()) if code_line.strip().isdigit() else -1
+            self._log(f"Read failed at 0x{address:08X}: "
+                       f"code={code_int} ({self._code_str(code_int)})")
+            return None
+
+        data = bytearray()
+        block_bytes = bytearray()
+        lines_in_block = 0
+        bytes_remaining = size
+
+        while bytes_remaining > 0:
+            line = self._read_line(timeout=3)
+            if not line:
+                self._log(f"Timeout ({bytes_remaining} bytes remaining)")
+                break
+
+            stripped = line.strip()
+
+            if stripped.isdigit() and lines_in_block > 0:
+                expected = int(stripped)
+                actual = sum(block_bytes) & 0xFFFFFFFF
+                if expected != actual:
+                    self._dbg(f"   checksum mismatch: {actual} != {expected}")
+                self._send_raw('OK')
+                block_bytes = bytearray()
+                lines_in_block = 0
+                continue
+
+            decoded = uu_decode_line(line)
+            if decoded:
+                data.extend(decoded)
+                block_bytes.extend(decoded)
+                bytes_remaining -= len(decoded)
+                lines_in_block += 1
+            else:
+                if stripped.isdigit():
+                    self._send_raw('OK')
+                    block_bytes = bytearray()
+                    lines_in_block = 0
+
+        trailing = self._read_line(timeout=0.5)
+        if trailing and trailing.strip().isdigit():
+            self._send_raw('OK')
+
+        if len(data) < size:
+            self._log(f"WARNING: got {len(data)}/{size} bytes")
+            if len(data) == 0:
+                return None
+
+        return bytes(data[:size])
+
+    def read_memory_large(self, address, total_size, chunk=4096):
+        if total_size & 3:
+            total_size = (total_size + 3) & ~3
+        result = bytearray()
+        offset = 0
+        while offset < total_size:
+            remaining = total_size - offset
+            this_chunk = min(chunk, remaining)
+            if this_chunk < 4:
+                this_chunk = 4
+            pct = offset * 100 // total_size if total_size > 0 else 0
+            self._log(f"Reading 0x{address + offset:08X}, "
+                       f"{this_chunk} bytes ({pct}%)")
+            data = self.read_memory(address + offset, this_chunk)
+            if data is None:
+                self._log(f"FAILED at offset 0x{offset:08X}")
+                return None
+            result.extend(data)
+            offset += this_chunk
+        self._log(f"Read complete: {len(result)} bytes")
+        return bytes(result[:total_size])
+
+    # ==============================================================
+    #  Write support
+    # ==============================================================
+
+    # ----------------------------------------------------------
+    #  Prepare sectors for write/erase (P command)
+    # ----------------------------------------------------------
+
+    def prepare_sectors(self, start_sector, end_sector):
+        """P <start> <end> — prepare sector(s) for write/erase."""
+        code = self._send_cmd_get_code(f'P {start_sector} {end_sector}')
+        if code == 0:
+            self._dbg(f"Prepared sectors {start_sector}-{end_sector}")
+            return True
+        self._log(f"Prepare sectors {start_sector}-{end_sector} failed: "
+                   f"code={code} ({self._code_str(code)})")
+        return False
+
+    # ----------------------------------------------------------
+    #  Erase sectors (E command)
+    # ----------------------------------------------------------
+
+    def erase_sectors(self, start_sector, end_sector):
+        """E <start> <end> — erase sector(s). Must be prepared first."""
+        code = self._send_cmd_get_code(f'E {start_sector} {end_sector}')
+        if code == 0:
+            self._log(f"Erased sectors {start_sector}-{end_sector}")
+            return True
+        self._log(f"Erase sectors {start_sector}-{end_sector} failed: "
+                   f"code={code} ({self._code_str(code)})")
+        return False
+
+    # ----------------------------------------------------------
+    #  Mass erase (all sectors — works even with CRP active)
+    # ----------------------------------------------------------
+
+    def erase_all(self):
+        """
+        Full chip erase: Prepare + Erase sectors 0-29.
+
+        When CRP1 or CRP2 is active, the ISP bootloader only allows
+        'Erase All' (all sectors at once). Partial erase / read / write
+        are blocked. After mass erase, CRP word at 0x2FC becomes 0xFF
+        and CRP is disabled — the chip is unlocked.
+
+        CRP3 (NO_ISP) disables ISP entry entirely, so this won't help.
+        """
+        self._log(f"Mass erase: preparing sectors 0-{LAST_SECTOR}...")
+        if not self.prepare_sectors(0, LAST_SECTOR):
+            return False
+        self._log(f"Erasing sectors 0-{LAST_SECTOR} (full chip)...")
+        if not self.erase_sectors(0, LAST_SECTOR):
+            return False
+        self._log("Mass erase complete — CRP is now cleared")
+        return True
+
+    # ----------------------------------------------------------
+    #  Write to RAM (W command)
+    # ----------------------------------------------------------
+
+    def write_to_ram(self, ram_addr, data):
+        """
+        W <start_addr> <num_bytes> — write data to RAM.
+        Sends UU-encoded data in blocks of 20 lines, with checksums.
+        num_bytes must be multiple of 4.
+        """
+        size = len(data)
+        if size & 3:
+            # Pad to multiple of 4
+            data = data + b'\x00' * (4 - (size & 3))
+            size = len(data)
+
+        cmd = f'W {ram_addr} {size}'
+        code = self._send_cmd_get_code(cmd)
+        if code != 0:
+            self._log(f"Write to RAM 0x{ram_addr:08X} failed: "
+                       f"code={code} ({self._code_str(code)})")
+            return False
+
+        # Send UU-encoded data in blocks
+        offset = 0
+        lines_in_block = 0
+        block_raw = bytearray()
+
+        while offset < size:
+            # UU line: up to 45 bytes
+            chunk = data[offset:offset + 45]
+            line = uu_encode_line(chunk)
+            self._send_raw(line)
+            block_raw.extend(chunk)
+            offset += len(chunk)
+            lines_in_block += 1
+
+            # After 20 lines or end of data: send checksum
+            if lines_in_block >= self.UU_LINES_PER_BLOCK or offset >= size:
+                checksum = sum(block_raw) & 0xFFFFFFFF
+                self._send_raw(str(checksum))
+
+                # Wait for OK or RESEND
+                resp = ''
+                for _ in range(5):
+                    resp = self._read_line(timeout=3)
+                    if resp.strip():
+                        break
+
+                if 'OK' in resp:
+                    self._dbg(f"   block checksum OK ({checksum})")
+                elif 'RESEND' in resp:
+                    self._log(f"RESEND requested at offset {offset}")
+                    # Re-send the same block (simplified: fail)
+                    return False
+                else:
+                    self._dbg(f"   checksum response: {resp!r}")
+                    # Some bootloaders don't reply OK for last block
+                    # Continue anyway
+
+                lines_in_block = 0
+                block_raw = bytearray()
+
+        self._dbg(f"Write to RAM complete: {size} bytes at 0x{ram_addr:08X}")
+        return True
+
+    # ----------------------------------------------------------
+    #  Copy RAM to Flash (C command)
+    # ----------------------------------------------------------
+
+    def copy_ram_to_flash(self, flash_addr, ram_addr, size):
+        """
+        C <flash_addr> <ram_addr> <size> — copy RAM to Flash.
+        flash_addr must be on 256-byte boundary.
+        size must be 256, 512, 1024, or 4096.
+        Sectors must be prepared first.
+        """
+        code = self._send_cmd_get_code(f'C {flash_addr} {ram_addr} {size}')
+        if code == 0:
+            self._dbg(f"Copied {size} bytes to Flash 0x{flash_addr:08X}")
+            return True
+        self._log(f"Copy to Flash 0x{flash_addr:08X} failed: "
+                   f"code={code} ({self._code_str(code)})")
+        return False
+
+    # ----------------------------------------------------------
+    #  High-level: write firmware to flash
+    # ----------------------------------------------------------
+
+    @staticmethod
+    def _pick_copy_size(remaining):
+        """Pick largest valid Copy-to-Flash size <= remaining."""
+        for sz in reversed(LpcIsp.COPY_SIZES):  # 4096, 1024, 512, 256
+            if remaining >= sz:
+                return sz
+        return 256  # minimum, pad with 0xFF
+
+    def write_flash(self, flash_addr, data, erase=True, verify=False):
+        """
+        Write 'data' to Flash starting at 'flash_addr'.
+
+        Steps for each chunk:
+          1. Prepare sector(s)
+          2. Erase sector(s) (first time for each sector)
+          3. Write chunk to RAM
+          4. Prepare sector(s) again
+          5. Copy RAM to Flash
+
+        flash_addr must be 256-byte aligned.
+        """
+        if flash_addr & 0xFF:
+            self._log(f"ERROR: flash address 0x{flash_addr:08X} "
+                       f"not 256-byte aligned")
+            return False
+
+        total = len(data)
+        if total == 0:
+            self._log("Nothing to write")
+            return True
+
+        # Pad to multiple of 256
+        if total & 0xFF:
+            pad = 256 - (total & 0xFF)
+            data = data + b'\xFF' * pad
+            total = len(data)
+            self._log(f"Padded to {total} bytes (256-byte alignment)")
+
+        # Determine sectors
+        first_sec, last_sec = sectors_for_range(flash_addr, total)
+        if first_sec is None:
+            self._log(f"ERROR: address range 0x{flash_addr:08X}-"
+                       f"0x{flash_addr + total - 1:08X} out of flash")
+            return False
+
+        self._log(f"Writing {total} bytes to 0x{flash_addr:08X}, "
+                   f"sectors {first_sec}-{last_sec}")
+
+        # Erase all affected sectors at once
+        if erase:
+            if not self.prepare_sectors(first_sec, last_sec):
+                return False
+            if not self.erase_sectors(first_sec, last_sec):
+                return False
+
+        # Write in chunks
+        offset = 0
+        while offset < total:
+            remaining = total - offset
+            chunk_size = self._pick_copy_size(remaining)
+            chunk_data = data[offset:offset + chunk_size]
+
+            # Pad chunk if needed
+            if len(chunk_data) < chunk_size:
+                chunk_data = chunk_data + b'\xFF' * (chunk_size - len(chunk_data))
+
+            cur_addr = flash_addr + offset
+            cur_sec_s, cur_sec_e = sectors_for_range(cur_addr, chunk_size)
+
+            pct = offset * 100 // total
+            self._log(f"  0x{cur_addr:08X} [{chunk_size}B] ({pct}%)")
+
+            # 1. Write to RAM
+            if not self.write_to_ram(RAM_BUF, chunk_data):
+                self._log(f"FAILED: write to RAM at chunk offset 0x{offset:X}")
+                return False
+
+            # 2. Prepare sectors (required before each copy)
+            if not self.prepare_sectors(cur_sec_s, cur_sec_e):
+                return False
+
+            # 3. Copy RAM → Flash
+            if not self.copy_ram_to_flash(cur_addr, RAM_BUF, chunk_size):
+                return False
+
+            offset += chunk_size
+
+        self._log(f"Write complete: {total} bytes to "
+                   f"0x{flash_addr:08X}-0x{flash_addr + total - 1:08X}")
+
+        # Verify
+        if verify:
+            self._log("Verifying...")
+            readback = self.read_memory_large(flash_addr, total)
+            if readback is None:
+                self._log("Verify FAILED: could not read back")
+                return False
+
+            # In ISP mode, addresses 0x00-0x3F are remapped to Boot ROM
+            # (MEMMAP=0). Reads return Boot ROM data, not Flash.
+            # Skip that region during verification.
+            skip_start = 0
+            skip_end = 0
+            if flash_addr < ISP_REMAP_SIZE:
+                skip_end = min(ISP_REMAP_SIZE - flash_addr, total)
+                self._log(f"NOTE: skipping verify of 0x{flash_addr:08X}-"
+                           f"0x{flash_addr + skip_end - 1:08X} "
+                           f"(ISP Boot ROM remap)")
+
+            mismatches = 0
+            for i in range(min(len(data), len(readback))):
+                if skip_start <= i < skip_end:
+                    continue
+                if data[i] != readback[i]:
+                    if mismatches < 10:
+                        self._log(f"  MISMATCH at 0x{flash_addr + i:08X}: "
+                                   f"wrote 0x{data[i]:02X}, "
+                                   f"read 0x{readback[i]:02X}")
+                    mismatches += 1
+            if mismatches:
+                self._log(f"Verify FAILED: {mismatches} byte(s) differ")
+                return False
+            self._log("Verify OK")
+
+        return True
+
+
+# ============================================================
+#  CLI helpers
+# ============================================================
+
+def parse_int(s):
+    s = s.strip()
+    return int(s, 16) if s.lower().startswith('0x') else int(s)
+
+
+def isp_connect(args):
+    """Create ISP connection, synchronize, disable echo, unlock."""
+    isp = LpcIsp(args.port, args.baud, args.crystal)
+    isp.verbose = not args.quiet
+    isp.debug = args.debug
+
+    if not isp.synchronize():
+        print("ERROR: Could not sync. Is P2.10 LOW during reset?",
+              file=sys.stderr)
+        sys.exit(1)
+
+    isp.disable_echo()
+    return isp
+
+
+# ============================================================
+#  Subcommands
+# ============================================================
+
+def cmd_info(args):
+    """Print Part ID, UID, boot code version."""
+    isp = isp_connect(args)
+    try:
+        pid = isp.read_part_id()
+        if pid is not None:
+            print(f"Part ID:    0x{pid:08X}")
+
+        uid = isp.read_uid()
+        if uid is not None:
+            print(f"UID:        {' '.join(f'{w:08X}' for w in uid)}")
+
+        ver = isp.read_boot_version()
+        if ver is not None:
+            print(f"Boot code:  v{ver[0]}.{ver[1]}")
+    finally:
+        isp.close()
+
+
+def cmd_read(args):
+    """Read memory region and save to file."""
+    address = parse_int(args.address)
+    size = parse_int(args.size)
+
+    if args.output is None:
+        args.output = f'isp_read_{address:08X}_{size}.bin'
+
+    isp = isp_connect(args)
+    try:
+        pid = isp.read_part_id()
+        if pid is not None:
+            print(f"Part ID: 0x{pid:08X}")
+
+        if not args.no_unlock:
+            isp.unlock()
+
+        print(f"Reading {size} bytes from 0x{address:08X}...")
+        data = isp.read_memory_large(address, size)
+
+        if data is None:
+            print("ERROR: Memory read failed.", file=sys.stderr)
+            sys.exit(1)
+
+        with open(args.output, 'wb') as f:
+            f.write(data)
+        print(f"Saved: {args.output} ({len(data)} bytes)")
+
+        if args.hex or size <= 256:
+            print()
+            for off in range(0, len(data), 16):
+                row = data[off:off + 16]
+                left = ' '.join(f'{b:02X}' for b in row[:8])
+                right = ' '.join(f'{b:02X}' for b in row[8:])
+                print(f'{address + off:08X}: {left}  {right}')
+
+        if address <= 0x2FC < address + size:
+            crp_off = 0x2FC - address
+            crp_val = struct.unpack_from('<I', data, crp_off)[0]
+            print(f"\nCRP word at 0x2FC: 0x{crp_val:08X}")
+            CRP_MAP = {
+                0x87654321: "CRP1 — ISP read disabled",
+                0x43218765: "CRP2 — ISP read+write disabled",
+                0x12345678: "CRP3/NO_ISP — ISP entry disabled",
+                0xFFFFFFFF: "No CRP (unprotected)",
+            }
+            print(f"  -> {CRP_MAP.get(crp_val, 'Unknown / no CRP')}")
+    finally:
+        isp.close()
+
+
+def cmd_write(args):
+    """Write firmware file to flash."""
+    address = parse_int(args.address)
+
+    if not os.path.isfile(args.file):
+        print(f"ERROR: file not found: {args.file}", file=sys.stderr)
+        sys.exit(1)
+
+    with open(args.file, 'rb') as f:
+        data = f.read()
+
+    if len(data) == 0:
+        print("ERROR: file is empty", file=sys.stderr)
+        sys.exit(1)
+
+    # Check if data would overwrite beyond flash
+    if address + len(data) > FLASH_SIZE:
+        print(f"ERROR: data ({len(data)} bytes) at 0x{address:08X} "
+              f"exceeds flash size (0x{FLASH_SIZE:X})", file=sys.stderr)
+        sys.exit(1)
+
+    # Warn about CRP
+    if address == 0 and len(data) > 0x2FC:
+        crp_val = struct.unpack_from('<I', data, 0x2FC)[0]
+        CRP_MAP = {
+            0x87654321: "CRP1", 0x43218765: "CRP2", 0x12345678: "CRP3/NO_ISP",
+        }
+        if crp_val in CRP_MAP:
+            print(f"WARNING: firmware contains {CRP_MAP[crp_val]} at 0x2FC "
+                  f"(0x{crp_val:08X})")
+            if crp_val == 0x12345678:
+                print("  CRP3 will PERMANENTLY disable ISP! "
+                      "Are you sure? Ctrl+C to abort.")
+                time.sleep(3)
+
+    print(f"File: {args.file} ({len(data)} bytes)")
+    print(f"Target: 0x{address:08X} - 0x{address + len(data) - 1:08X}")
+
+    first, last = sectors_for_range(address, len(data))
+    if first is None:
+        print("ERROR: address range outside flash", file=sys.stderr)
+        sys.exit(1)
+    print(f"Sectors: {first}-{last}")
+
+    isp = isp_connect(args)
+    try:
+        pid = isp.read_part_id()
+        if pid is not None:
+            print(f"Part ID: 0x{pid:08X}")
+
+        isp.unlock()
+
+        ok = isp.write_flash(address, data, erase=not args.no_erase,
+                              verify=args.verify)
+        if ok:
+            print("\nWrite successful!")
+        else:
+            print("\nWrite FAILED!", file=sys.stderr)
+            sys.exit(1)
+    finally:
+        isp.close()
+
+
+def cmd_erase(args):
+    """
+    Mass erase all flash — works even when CRP is active.
+
+    When CRP1 or CRP2 is enabled, the bootloader blocks read/write but
+    still allows a full-chip erase (Prepare 0-29 + Erase 0-29).
+    After erase, 0x2FC becomes 0xFFFFFFFF and CRP is disabled.
+    """
+    isp = isp_connect(args)
+    try:
+        pid = isp.read_part_id()
+        if pid is not None:
+            print(f"Part ID: 0x{pid:08X}")
+
+        isp.unlock()
+
+        if not args.yes:
+            print(f"This will ERASE ALL flash (sectors 0-{LAST_SECTOR}, "
+                  f"{FLASH_SIZE // 1024} KB).")
+            print("All data and CRP settings will be lost.")
+            try:
+                resp = input("Continue? [y/N] ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print("\nAborted.")
+                sys.exit(0)
+            if resp not in ('y', 'yes'):
+                print("Aborted.")
+                sys.exit(0)
+
+        ok = isp.erase_all()
+        if ok:
+            print("\nMass erase complete. Flash is blank, CRP is cleared.")
+            if args.write_after:
+                # Convenience: write firmware right after erase
+                if not os.path.isfile(args.write_after):
+                    print(f"ERROR: file not found: {args.write_after}",
+                          file=sys.stderr)
+                    sys.exit(1)
+                with open(args.write_after, 'rb') as f:
+                    data = f.read()
+                print(f"\nWriting {args.write_after} ({len(data)} bytes)...")
+                ok = isp.write_flash(0, data, erase=False, verify=True)
+                if ok:
+                    print("Write + verify successful!")
+                else:
+                    print("Write FAILED!", file=sys.stderr)
+                    sys.exit(1)
+        else:
+            print("\nMass erase FAILED!", file=sys.stderr)
+            sys.exit(1)
+    finally:
+        isp.close()
+
+
+# ============================================================
+#  Argument parser
+# ============================================================
+
+def main():
+    # Common args shared by all subcommands via parents
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument('-p', '--port', required=True,
+                        help='Serial port (e.g. /dev/ttyUSB0, COM3)')
+    common.add_argument('-b', '--baud', type=int, default=9600,
+                        help='Baud rate (default: 9600)')
+    common.add_argument('-c', '--crystal', type=int, default=4000,
+                        help='Crystal freq kHz (default: 4000 = IRC)')
+    common.add_argument('-q', '--quiet', action='store_true')
+    common.add_argument('--debug', action='store_true',
+                        help='Show all serial I/O')
+
+    ap = argparse.ArgumentParser(
+        description='LPC1768 ISP flash tool (read/write via UART)')
+    sub = ap.add_subparsers(dest='command', help='Command')
+
+    # --- info ---
+    sub.add_parser('info', parents=[common],
+                   help='Show Part ID, UID, boot version')
+
+    # --- read ---
+    rp = sub.add_parser('read', parents=[common], help='Read memory')
+    rp.add_argument('-a', '--address', required=True,
+                    help='Start address (hex or dec)')
+    rp.add_argument('-s', '--size', required=True,
+                    help='Bytes to read (hex or dec)')
+    rp.add_argument('-o', '--output', default=None,
+                    help='Output file (default: auto)')
+    rp.add_argument('--no-unlock', action='store_true')
+    rp.add_argument('--hex', action='store_true',
+                    help='Hex dump to stdout')
+
+    # --- write ---
+    wp = sub.add_parser('write', parents=[common],
+                        help='Write firmware to flash')
+    wp.add_argument('-f', '--file', required=True,
+                    help='Binary file to write')
+    wp.add_argument('-a', '--address', default='0',
+                    help='Flash address (default: 0x00000000)')
+    wp.add_argument('--verify', action='store_true',
+                    help='Read back and verify after write')
+    wp.add_argument('--no-erase', action='store_true',
+                    help='Skip sector erase (for pre-erased flash)')
+
+    # --- erase ---
+    ep = sub.add_parser('erase', parents=[common],
+                        help='Mass erase all flash (works with CRP)')
+    ep.add_argument('-y', '--yes', action='store_true',
+                    help='Skip confirmation prompt')
+    ep.add_argument('-f', '--write-after', default=None, metavar='FILE',
+                    help='Write this firmware immediately after erase')
+
+    args = ap.parse_args()
+
+    if args.command is None:
+        ap.print_help()
+        sys.exit(1)
+
+    if args.command == 'info':
+        cmd_info(args)
+    elif args.command == 'read':
+        cmd_read(args)
+    elif args.command == 'write':
+        cmd_write(args)
+    elif args.command == 'erase':
+        cmd_erase(args)
+
+
+if __name__ == '__main__':
+    main()

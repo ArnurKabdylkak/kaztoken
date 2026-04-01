@@ -1,0 +1,153 @@
+
+Discarded input sections
+
+ .text          0x00000000        0x0 startup.o
+ .data          0x00000000        0x0 startup.o
+ .bss           0x00000000        0x0 startup.o
+ .text          0x00000000        0x0 main.o
+ .data          0x00000000        0x0 main.o
+ .bss           0x00000000        0x0 main.o
+
+Memory Configuration
+
+Name             Origin             Length             Attributes
+FLASH            0x00000000         0x00080000         xr
+SRAM             0x10000000         0x00008000         xrw
+*default*        0x00000000         0xffffffff
+
+Linker script and memory map
+
+LOAD startup.o
+LOAD main.o
+                0x10008000                        _stack_top = (ORIGIN (SRAM) + LENGTH (SRAM))
+
+.isr_vector     0x00000000       0xc4
+ *(.isr_vector)
+ .isr_vector    0x00000000       0xc4 startup.o
+                0x00000000                g_vectors
+
+.text           0x000000c4      0x22c
+ *(.text*)
+ .text.Default_Handler
+                0x000000c4        0x4 startup.o
+                0x000000c4                HardFault_Handler
+                0x000000c4                SysTick_Handler
+                0x000000c4                PendSV_Handler
+                0x000000c4                NMI_Handler
+                0x000000c4                UsageFault_Handler
+                0x000000c4                Default_Handler
+                0x000000c4                MemManage_Handler
+                0x000000c4                SVC_Handler
+                0x000000c4                BusFault_Handler
+ .text.Reset_Handler
+                0x000000c8       0x60 startup.o
+                0x000000c8                Reset_Handler
+ .text.puts_    0x00000128       0x34 main.o
+ .text.startup.main
+                0x0000015c       0xe4 main.o
+                0x0000015c                main
+ *(.rodata*)
+ .rodata.main.str1.4
+                0x00000240       0x8f main.o
+                                 0x5d (size before relaxing)
+ .rodata.str1.4
+                0x000002cf        0x0 main.o
+                                 0x2f (size before relaxing)
+ *fill*         0x000002cf        0x1 
+ .rodata        0x000002d0       0x20 main.o
+                0x000002f0                        . = ALIGN (0x4)
+                0x000002f0                        _etext = .
+                0x000002f0                        _data_load = LOADADDR (.data)
+
+.glue_7         0x000002f0        0x0
+ .glue_7        0x000002f0        0x0 linker stubs
+
+.glue_7t        0x000002f0        0x0
+ .glue_7t       0x000002f0        0x0 linker stubs
+
+.vfp11_veneer   0x000002f0        0x0
+ .vfp11_veneer  0x000002f0        0x0 linker stubs
+
+.v4_bx          0x000002f0        0x0
+ .v4_bx         0x000002f0        0x0 linker stubs
+
+.iplt           0x000002f0        0x0
+ .iplt          0x000002f0        0x0 startup.o
+
+.rel.dyn        0x000002f0        0x0
+ .rel.iplt      0x000002f0        0x0 startup.o
+
+.data           0x10000000        0x0 load address 0x000002f0
+                0x10000000                        _data_start = .
+ *(.data*)
+                0x10000000                        . = ALIGN (0x4)
+                0x10000000                        _data_end = .
+
+.igot.plt       0x10000000        0x0 load address 0x000002f0
+ .igot.plt      0x10000000        0x0 startup.o
+
+.bss            0x10000000        0x0 load address 0x000002f0
+                0x10000000                        _bss_start = .
+ *(.bss*)
+ *(COMMON)
+                0x10000000                        . = ALIGN (0x4)
+                0x10000000                        _bss_end = .
+                0x10000000                        _heap_start = _bss_end
+                0x10007c00                        _heap_end = (_stack_top - 0x400)
+OUTPUT(firmware.elf elf32-littlearm)
+LOAD linker stubs
+
+.debug_info     0x00000000      0x38c
+ .debug_info    0x00000000      0x14e startup.o
+ .debug_info    0x0000014e      0x23e main.o
+
+.debug_abbrev   0x00000000      0x2b6
+ .debug_abbrev  0x00000000       0xf3 startup.o
+ .debug_abbrev  0x000000f3      0x1c3 main.o
+
+.debug_loclists
+                0x00000000       0x8f
+ .debug_loclists
+                0x00000000       0x46 startup.o
+ .debug_loclists
+                0x00000046       0x49 main.o
+
+.debug_aranges  0x00000000       0x50
+ .debug_aranges
+                0x00000000       0x28 startup.o
+ .debug_aranges
+                0x00000028       0x28 main.o
+
+.debug_rnglists
+                0x00000000       0x66
+ .debug_rnglists
+                0x00000000       0x19 startup.o
+ .debug_rnglists
+                0x00000019       0x4d main.o
+
+.debug_line     0x00000000      0x30f
+ .debug_line    0x00000000       0xc5 startup.o
+ .debug_line    0x000000c5      0x24a main.o
+
+.debug_str      0x00000000      0x1c4
+ .debug_str     0x00000000      0x1c4 startup.o
+                                0x1bb (size before relaxing)
+ .debug_str     0x000001c4        0x0 main.o
+                                0x18b (size before relaxing)
+
+.comment        0x00000000       0x23
+ .comment       0x00000000       0x23 startup.o
+                                 0x24 (size before relaxing)
+ .comment       0x00000023        0x0 main.o
+                                 0x24 (size before relaxing)
+
+.ARM.attributes
+                0x00000000       0x2d
+ .ARM.attributes
+                0x00000000       0x2d startup.o
+ .ARM.attributes
+                0x0000002d       0x2d main.o
+
+.debug_frame    0x00000000       0x78
+ .debug_frame   0x00000000       0x38 startup.o
+ .debug_frame   0x00000038       0x40 main.o
